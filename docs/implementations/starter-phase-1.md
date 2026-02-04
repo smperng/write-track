@@ -1,143 +1,278 @@
-# WriteTrack Phase 0 — Implementation Plan
+# WriteTrack Phase 1 — Core Project & Draft Management
 
 ## Summary
 
-Scaffold a production-ready SvelteKit app from an empty directory. This covers all 8 items in Phase 0 of the roadmap plus an initial `projects` table migration to validate the DB workflow for Phase 1a.
+Implement the full Phase 1 (1a–1d) of the roadmap: Project CRUD with dashboard, hierarchical content structure (Part > Chapter > Scene), TipTap rich-text editor, multiple named drafts with word-level diff, snapshots, and per-scene status tags with project completion tracking.
 
-## Tech Decisions
+## Key Design Decisions
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Scaffolder | `npx sv create` with `--no-dir-check` | Official tool, generates SvelteKit + Svelte 5 + TS |
-| TailwindCSS | v4 via `@tailwindcss/vite`, CSS-based `@theme` config | Latest standard, no tailwind.config.js |
-| Supabase client | `@supabase/supabase-js` + `@supabase/ssr` | SSR-compatible auth via cookies |
-| DB migrations | Raw SQL via Supabase CLI (`supabase/migrations/`) | Simplest Supabase-native approach, no ORM |
-| AI SDK | `ai` + `@ai-sdk/openai` + `@ai-sdk/anthropic` + `@ai-sdk/google` | Provider-agnostic, server-only |
-| CI | GitHub Actions (lint, type-check, test) | Lightweight, no Docker needed |
+| Editor | TipTap (ProseMirror-based) | Rich extension ecosystem, framework-agnostic core, good Svelte integration via thin wrapper |
+| Scene content storage | `text` (HTML from TipTap `getHTML()`) | Simple to store, render, and diff; TipTap accepts HTML as input |
+| Drafts model | Scenes scoped to a draft via `draft_id` FK; new draft = duplicate all scenes | Each draft has independent content; simple mental model for writers |
+| Chapters without parts | `chapters.part_id` is nullable | Short novels can skip parts entirely; chapters attach directly to project |
+| RLS strategy | `user_id` column on every table | Simplest, fastest RLS checks — no joins needed in policies |
+| Mutations | SvelteKit form actions (primary) + API routes (auto-save, reorder) | Progressive enhancement for forms; async saves need API endpoints |
+| DnD library | `svelte-dnd-action` | Mature Svelte-native library, supports nested sortable lists |
+| Diff library | `diff-match-patch` | Standard word-level diffing, well-maintained |
+| Project tree | Rendered inside `[projectId]` layout content area (not in AppShell sidebar) | Avoids double-sidebar; tree is project-contextual |
 
-## Steps
+## New Dependencies
 
-### 1. Scaffold SvelteKit project
+**Production:** `@tiptap/core`, `@tiptap/pm`, `@tiptap/starter-kit`, `svelte-dnd-action`, `diff-match-patch`
+**Dev:** `@types/diff-match-patch`
+
+## Database Migration
+
+Single migration file: `supabase/migrations/20250201000000_phase1_structure_drafts.sql`
+
+### New Enums
+- `scene_status`: brainstormed, rough, revised, polished, final
+
+### New Tables
+
+**`parts`** — optional groupings within a project
+- id (uuid pk), user_id (fk auth.users CASCADE), project_id (fk projects CASCADE), title, sort_order (int), timestamps
+
+**`drafts`** — named versions of a manuscript
+- id (uuid pk), user_id (fk auth.users CASCADE), project_id (fk projects CASCADE), name, notes, is_active (bool), timestamps
+- Partial unique index: only one active draft per project
+
+**`chapters`** — belong to a part or directly to a project
+- id (uuid pk), user_id (fk auth.users CASCADE), project_id (fk projects CASCADE), part_id (fk parts CASCADE, **nullable**), title, sort_order (int), timestamps
+
+**`scenes`** — atomic writing units, scoped to a chapter and draft
+- id (uuid pk), user_id (fk auth.users CASCADE), chapter_id (fk chapters CASCADE), draft_id (fk drafts CASCADE), title, content (text, default ''), word_count (int, default 0), status (scene_status, default 'brainstormed'), sort_order (int), timestamps
+- Composite index on (chapter_id, draft_id, sort_order)
+
+**`snapshots`** — immutable point-in-time scene content saves
+- id (uuid pk), user_id (fk auth.users CASCADE), scene_id (fk scenes CASCADE), draft_id (fk drafts SET NULL, nullable), content (text), word_count (int), label, description, created_at only (no updated_at — immutable)
+
+### Modify Existing
+- Add `archived_at timestamptz` to `projects` table
+
+All tables get: user_id index, FK indexes, RLS (select/insert/update/delete for own rows), handle_updated_at trigger (except snapshots).
+
+## Route Structure
+
 ```
-npx sv create . --template minimal --types ts \
-  --no-add-ons --no-dir-check --no-install
+src/routes/
+  +page.svelte                                 ← Modified (live dashboard stats)
+  +page.server.ts                              ← Created (load stats + recent projects)
+  projects/
+    +page.svelte                               ← Modified (project list + create modal)
+    +page.server.ts                            ← Created (load projects, CRUD form actions)
+    [projectId]/
+      +layout.server.ts                        ← Created (load project + tree structure + drafts)
+      +layout.svelte                           ← Created (project workspace: tree panel + content)
+      +page.svelte                             ← Created (redirect to overview)
+      +page.server.ts                          ← Created (redirect logic)
+      overview/
+        +page.svelte                           ← Created (project settings, draft management)
+        +page.server.ts                        ← Created (project detail, draft CRUD actions)
+      [sceneId]/
+        +page.svelte                           ← Created (TipTap editor)
+        +page.server.ts                        ← Created (load scene, save/status actions)
+        snapshots/
+          +page.svelte                         ← Created (snapshot list + diff view)
+          +page.server.ts                      ← Created (load snapshots, create/restore actions)
+  api/projects/[projectId]/
+    scenes/[sceneId]/+server.ts                ← Created (PUT auto-save)
+    reorder/+server.ts                         ← Created (PATCH reorder)
 ```
-Generates: package.json, svelte.config.js, vite.config.ts, tsconfig.json, src/
 
-Note: `--no-add-ons` is used because `--add` with tailwindcss/vitest prompts for interactive input. Tailwind, ESLint, Prettier, and Vitest are configured manually instead.
+## Component Architecture
 
-### 2. Initialize git
-`git init`, verify `.gitignore` includes node_modules, .svelte-kit, build, .env, .env.*
+### `src/lib/components/ui/` (shared primitives)
+- **Modal.svelte** — backdrop + title + close + children snippet
+- **ConfirmDialog.svelte** — danger/warning confirm modal
+- **Badge.svelte** — generic colored badge
+- **DropdownMenu.svelte** — three-dot action menu with click-outside
+- **InlineEdit.svelte** — double-click to edit text, Enter/Escape
+- **SceneStatusBadge.svelte** — maps scene_status to colored badge
+- **ProgressBar.svelte** — horizontal progress bar for completion %
 
-### 3. Install dependencies
-**Production:** `@supabase/supabase-js`, `@supabase/ssr`, `ai`, `@ai-sdk/svelte`, `@ai-sdk/openai`, `@ai-sdk/anthropic`, `@ai-sdk/google`, `zod`
-**Dev:** `@tailwindcss/vite`, `tailwindcss`, `eslint`, `eslint-config-prettier`, `eslint-plugin-svelte`, `globals`, `prettier`, `prettier-plugin-svelte`, `typescript-eslint`, `vitest`, `supabase` (CLI for migrations & type gen)
+### `src/lib/components/projects/`
+- **ProjectCard.svelte** — card with title, status badge, word count, deadline, action menu
+- **ProjectList.svelte** — grid of ProjectCards or empty state
+- **ProjectForm.svelte** — create/edit form (title, description, status, genre, target, deadline)
+- **ProjectStatusBadge.svelte** — maps project_status to colored badge
 
-### 4. Configure tooling manually
+### `src/lib/components/structure/`
+- **ProjectTree.svelte** — full tree-view with add buttons at each level, completion progress header
+- **TreeNode.svelte** — single tree row: expand/collapse, inline-edit title, status badge (scenes), context menu, depth-based indent
+- **StructureForm.svelte** — inline title-only form for adding part/chapter/scene
 
-#### vite.config.ts
-- Import `@tailwindcss/vite` and add to plugins
-- Use `vitest/config` for `defineConfig` with `test.include` for `src/**/*.{test,spec}.{js,ts}`
+### `src/lib/components/editor/`
+- **SceneEditor.svelte** — TipTap wrapper: init editor, auto-save (debounced PUT), word count tracking, status selector
+- **EditorToolbar.svelte** — formatting buttons (bold, italic, headings, lists, undo/redo)
+- **WordCounter.svelte** — current word count + optional target progress
+- **tiptap.ts** — editor factory function, extensions config, word count utility
 
-#### eslint.config.js
-- ESLint 9 flat config with `typescript-eslint`, `eslint-plugin-svelte`, `eslint-config-prettier`
-- Ignores: `build/`, `.svelte-kit/`, `dist/`
+### `src/lib/components/drafts/`
+- **DraftSelector.svelte** — dropdown for switching drafts
+- **DraftDiff.svelte** — word-level diff display (additions green, deletions red)
+- **DraftNotes.svelte** — textarea for per-draft notes
+- **SnapshotList.svelte** — list snapshots with restore/compare/delete actions
+- **SnapshotCreate.svelte** — button + label input for creating a snapshot
 
-#### .prettierrc
-- Tabs, single quotes, trailing comma none, print width 100
-- `prettier-plugin-svelte` with svelte parser override
+## Implementation Order
 
-### 5. Environment variables
-- `.env.example` (committed): `PUBLIC_SUPABASE_URL`, `PUBLIC_SUPABASE_ANON_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`
-- `.env` (gitignored): copy with placeholders
+### Phase 1a: Project Dashboard
 
-### 6. Supabase client setup
-- `src/app.d.ts` — declare `App.Locals` with supabase client + safeGetSession
-- `src/hooks.server.ts` — create SSR-compatible Supabase client per request using `@supabase/ssr`'s `createServerClient`
-- `src/routes/+layout.server.ts` — pass session/user to pages
-- `src/lib/types/database.ts` — hand-written type placeholder matching initial schema (Row/Insert/Update for projects table)
+1. Migration: add `archived_at` to projects (combined into the single Phase 1 migration)
+2. Update `src/lib/types/database.ts` — add archived_at to project types
+3. Create shared UI components: Modal, ConfirmDialog, Badge, DropdownMenu, InlineEdit
+4. Create project components: ProjectStatusBadge, ProjectCard, ProjectList, ProjectForm
+5. Create `src/routes/projects/+page.server.ts` — load projects + CRUD form actions
+6. Update `src/routes/projects/+page.svelte` — render ProjectList, create modal
+7. Create `src/routes/+page.server.ts` — load dashboard stats
+8. Update `src/routes/+page.svelte` — live stats from server data
+9. Update `src/lib/utils/format.ts` — add formatDeadline, formatSceneStatus
+10. Update `src/lib/utils/format.test.ts` — tests for new functions
 
-### 7. Database schema
-- `npx supabase init` → creates supabase/config.toml + migrations/
-- Create migration `20250101000000_create_projects_table.sql`:
-  - `project_status` enum: planning, drafting, revising, complete, on_hold
-  - `projects` table: id (uuid), user_id, title, description, status, genre, target_word_count, deadline, timestamps
-  - Index on user_id
-  - RLS policies (users access own projects only): select, insert, update, delete
-  - `handle_updated_at()` trigger function
-- Add db scripts to package.json: `db:start`, `db:stop`, `db:reset`, `db:migration:new`, `db:types`
+### Phase 1b: Hierarchical Structure
 
-### 8. AI SDK integration
-- `src/lib/server/ai.ts` — create provider instances (openai, anthropic, google) + defaultModel export + providers availability map. Lives in `server/` to prevent client import.
-- `src/routes/api/ai/health/+server.ts` — smoke-test GET endpoint returning provider availability status
+1. Migration: create parts, chapters, scenes tables + scene_status enum + drafts table (single migration file)
+2. Install: `@tiptap/core @tiptap/pm @tiptap/starter-kit svelte-dnd-action`
+3. Update `src/lib/types/database.ts` — add all new table types + scene_status
+4. Create `src/lib/types/structure.ts` — tree item interfaces, nested types, status weights
+5. Create structure components: ProjectTree, TreeNode, StructureForm
+6. Create editor components: tiptap.ts, SceneEditor, EditorToolbar, WordCounter
+7. Create all `[projectId]` route files (layout, overview, scene editor)
+8. Create API routes for auto-save and reorder
+9. Update Sidebar.svelte — show "Back to Projects" when inside a project
 
-### 9. Layout shell
-- `src/lib/components/layout/Sidebar.svelte` — collapsible sidebar with nav links (Dashboard, Projects) using `resolve()` from `$app/paths` for route resolution
-- `src/lib/components/layout/Topbar.svelte` — top bar with app name + user email display
-- `src/lib/components/layout/AppShell.svelte` — orchestrates sidebar + topbar + main content area using Svelte 5 snippets
-- Update `src/routes/+layout.svelte` — import app.css, render AppShell with user data from layout server load
-- Update `src/routes/+page.svelte` — dashboard placeholder with stats cards
-- Create `src/routes/projects/+page.svelte` — projects page placeholder (required for route type-safety with `resolve()`)
+### Phase 1c: Drafts & Snapshots
 
-### 10. Tailwind theme
-`src/app.css` with `@import 'tailwindcss'` and `@theme` block:
-- Primary color scale (sky blue, oklch values) from 50–950
-- Inter as the sans-serif font
+1. Migration: add snapshots table (part of the single migration)
+2. Install: `diff-match-patch @types/diff-match-patch`
+3. Create `src/lib/utils/diff.ts` — extract text from HTML, run diff-match-patch, return annotated segments
+4. Create `src/lib/utils/diff.test.ts` — unit tests
+5. Create draft components: DraftSelector, DraftDiff, DraftNotes
+6. Create snapshot components: SnapshotList, SnapshotCreate
+7. Create snapshot route files
+8. Integrate drafts into project overview page
+9. Add snapshot creation to scene editor page
 
-### 11. CI pipeline
-`.github/workflows/ci.yml`: checkout → Node 22 → npm ci → lint → format:check → type-check → test:unit
+### Phase 1d: Status Tags
 
-### 12. Baseline test
-- `src/lib/utils/format.ts` — `formatWordCount` (locale-aware comma formatting), `formatStatus` (enum to label mapping)
-- `src/lib/utils/format.test.ts` — 10 unit tests covering zero, small, large numbers, suffix toggle, and all status values
+1. Create SceneStatusBadge, ProgressBar components
+2. Add `calculateCompletionPercentage()` to format.ts with tests
+3. Integrate status badges into TreeNode (scenes)
+4. Add completion progress to ProjectTree header
+5. Add status selector to scene editor
+6. Show completion % on ProjectCard
+
+## Types Added to `src/lib/types/database.ts`
+
+```typescript
+export type SceneStatus = 'brainstormed' | 'rough' | 'revised' | 'polished' | 'final';
+
+// Row/Insert/Update interfaces for: parts, chapters, scenes, drafts, snapshots
+// Added archived_at to projects Row/Insert/Update
+```
+
+## New File: `src/lib/types/structure.ts`
+
+```typescript
+// Tree item interfaces for sidebar rendering
+export interface SceneTreeItem { id, title, word_count, status, sort_order }
+export interface ChapterWithScenes { id, title, sort_order, part_id, scenes: SceneTreeItem[] }
+export interface PartWithChildren { id, title, sort_order, chapters: ChapterWithScenes[] }
+export interface ProjectStructure { parts: PartWithChildren[], chapters: ChapterWithScenes[] }
+
+// Status weights for completion calculation
+export const SCENE_STATUS_WEIGHTS: Record<SceneStatus, number> = {
+  brainstormed: 0, rough: 0.25, revised: 0.5, polished: 0.75, final: 1.0
+};
+```
+
+## Data Flow
+
+- **Dashboard**: `+page.server.ts` loads aggregate stats (project count, total words from active drafts, recent projects) → `+page.svelte` renders stat cards with real data
+- **Projects list**: `+page.server.ts` loads non-archived projects → form actions handle create/update/archive/delete → `use:enhance` for progressive enhancement
+- **Project workspace**: `[projectId]/+layout.server.ts` loads project + full tree structure (parts with nested chapters with nested scene metadata) + drafts → passed to all child routes
+- **Scene editor**: `[sceneId]/+page.server.ts` loads full scene content → TipTap editor initialized → auto-save via debounced PUT to API route → form actions for status update and snapshot creation
+- **Tree-view sync**: clicking a scene navigates to `/projects/[projectId]/[sceneId]`; layout data is cached by SvelteKit for sibling navigations; structure mutations use API fetch + `invalidateAll()` to refresh tree
 
 ## Files Created/Modified
 
-| File | Action |
-|------|--------|
-| `package.json` | Modified (add deps + scripts) |
-| `vite.config.ts` | Modified (add tailwind + vitest) |
-| `eslint.config.js` | Create |
-| `.prettierrc` | Create |
-| `.prettierignore` | Create |
-| `.gitignore` | Verify (already correct from scaffold) |
-| `.env.example` | Create |
-| `.env` | Create |
-| `src/app.d.ts` | Modify (add Supabase types) |
-| `src/app.css` | Create (Tailwind + @theme) |
-| `src/hooks.server.ts` | Create |
-| `src/routes/+layout.svelte` | Modify (add AppShell) |
-| `src/routes/+layout.server.ts` | Create |
-| `src/routes/+page.svelte` | Modify (dashboard placeholder) |
-| `src/routes/projects/+page.svelte` | Create (placeholder) |
-| `src/routes/api/ai/health/+server.ts` | Create |
-| `src/lib/server/ai.ts` | Create |
-| `src/lib/types/database.ts` | Create |
-| `src/lib/components/layout/Sidebar.svelte` | Create |
-| `src/lib/components/layout/Topbar.svelte` | Create |
-| `src/lib/components/layout/AppShell.svelte` | Create |
-| `src/lib/utils/format.ts` | Create |
-| `src/lib/utils/format.test.ts` | Create |
-| `supabase/config.toml` | Create (via supabase init) |
-| `supabase/migrations/20250101000000_create_projects_table.sql` | Create |
-| `.github/workflows/ci.yml` | Create |
+### New Files (~50)
+
+| File | Description |
+|------|-------------|
+| `supabase/migrations/20250201000000_phase1_structure_drafts.sql` | Migration |
+| `src/lib/types/structure.ts` | Tree item interfaces + status weights |
+| `src/lib/components/ui/Modal.svelte` | Modal dialog |
+| `src/lib/components/ui/ConfirmDialog.svelte` | Confirm dialog |
+| `src/lib/components/ui/Badge.svelte` | Generic badge |
+| `src/lib/components/ui/DropdownMenu.svelte` | Action menu |
+| `src/lib/components/ui/InlineEdit.svelte` | Inline text edit |
+| `src/lib/components/ui/SceneStatusBadge.svelte` | Scene status badge |
+| `src/lib/components/ui/ProgressBar.svelte` | Progress bar |
+| `src/lib/components/projects/ProjectCard.svelte` | Project card |
+| `src/lib/components/projects/ProjectList.svelte` | Project list grid |
+| `src/lib/components/projects/ProjectForm.svelte` | Project create/edit form |
+| `src/lib/components/projects/ProjectStatusBadge.svelte` | Project status badge |
+| `src/lib/components/structure/ProjectTree.svelte` | Full tree-view |
+| `src/lib/components/structure/TreeNode.svelte` | Tree row |
+| `src/lib/components/structure/StructureForm.svelte` | Inline add form |
+| `src/lib/components/editor/tiptap.ts` | Editor factory + word count |
+| `src/lib/components/editor/SceneEditor.svelte` | TipTap wrapper |
+| `src/lib/components/editor/EditorToolbar.svelte` | Formatting toolbar |
+| `src/lib/components/editor/WordCounter.svelte` | Word count display |
+| `src/lib/components/drafts/DraftSelector.svelte` | Draft switcher |
+| `src/lib/components/drafts/DraftDiff.svelte` | Word-level diff view |
+| `src/lib/components/drafts/DraftNotes.svelte` | Draft notes textarea |
+| `src/lib/components/drafts/SnapshotList.svelte` | Snapshot list |
+| `src/lib/components/drafts/SnapshotCreate.svelte` | Snapshot create button |
+| `src/routes/+page.server.ts` | Dashboard stats loader |
+| `src/routes/projects/+page.server.ts` | Projects CRUD actions |
+| `src/routes/projects/[projectId]/+layout.server.ts` | Project workspace loader |
+| `src/routes/projects/[projectId]/+layout.svelte` | Project workspace layout |
+| `src/routes/projects/[projectId]/+page.svelte` | Redirect to overview |
+| `src/routes/projects/[projectId]/+page.server.ts` | Redirect logic |
+| `src/routes/projects/[projectId]/overview/+page.svelte` | Project settings + drafts |
+| `src/routes/projects/[projectId]/overview/+page.server.ts` | Draft CRUD actions |
+| `src/routes/projects/[projectId]/[sceneId]/+page.svelte` | Scene editor |
+| `src/routes/projects/[projectId]/[sceneId]/+page.server.ts` | Scene loader + actions |
+| `src/routes/projects/[projectId]/[sceneId]/snapshots/+page.svelte` | Snapshot list + diff |
+| `src/routes/projects/[projectId]/[sceneId]/snapshots/+page.server.ts` | Snapshot actions |
+| `src/routes/api/projects/[projectId]/scenes/[sceneId]/+server.ts` | PUT auto-save |
+| `src/routes/api/projects/[projectId]/reorder/+server.ts` | PATCH structure CRUD |
+| `src/lib/utils/diff.ts` | Diff utility |
+| `src/lib/utils/diff.test.ts` | Diff tests |
+
+### Modified Files
+
+| File | Changes |
+|------|---------|
+| `package.json` | Added 6 new dependencies |
+| `src/lib/types/database.ts` | Added SceneStatus, parts, chapters, scenes, drafts, snapshots types, archived_at on projects |
+| `src/lib/utils/format.ts` | Added formatSceneStatus, formatDeadline, calculateCompletionPercentage |
+| `src/lib/utils/format.test.ts` | Added tests for new format functions (25 total tests) |
+| `src/lib/components/layout/Sidebar.svelte` | Added "Back to Projects" link when inside a project |
+| `src/routes/+page.svelte` | Live dashboard stats from server data |
+| `src/routes/projects/+page.svelte` | Project list with create modal, archive/delete |
 
 ## Verification
 
 ```bash
-npm run lint             # Linting passes
-npm run format:check     # Prettier passes
-npm run check            # Type checking passes (0 errors, 0 warnings)
-npm run test:unit -- --run  # 10 tests pass
+npm run check            # Type checking passes (0 errors, 4 warnings)
+npm run lint             # Linting passes (0 errors)
+npm run test:unit -- --run  # All 34 tests pass (existing + new format/diff tests)
 npm run build            # Build succeeds
-npm run dev              # Dev server starts, layout shell visible at localhost:5173
-curl localhost:5173/api/ai/health  # Returns JSON with provider availability
+npm run dev              # Dev server starts at localhost:5173
 ```
 
 ## Implementation Notes
 
-- `sv create --add tailwindcss,vitest` was avoided because those addons require interactive prompts that can't be bypassed non-interactively. All tooling was configured manually instead.
-- The `svelte/no-navigation-without-resolve` ESLint rule requires using `resolve()` from `$app/paths` directly in href attributes, not via pre-computed variables. Navigation items store route IDs and call `resolve()` inline in the template.
-- The `resolve()` function is strictly typed to known routes, so the `/projects` route page was created as a placeholder to satisfy the type checker.
-- `prettier-plugin-svelte` v4 does not exist yet; v3.4.x is the latest.
-- The Supabase client in `app.d.ts` uses the unparameterized `SupabaseClient` type to avoid generic compatibility issues with `@supabase/ssr`'s `createServerClient` return type.
+- The `state_referenced_locally` Svelte warnings in SceneEditor, DraftNotes, and InlineEdit are expected — these components intentionally initialize local mutable state from props (e.g., `let wordCount = $state(scene.word_count)`) so edits don't propagate back to the parent until explicitly saved.
+- TreeNode uses an eslint-disable comment for `svelte/no-navigation-without-resolve` because it receives pre-resolved href strings from its parent (ProjectTree calls `resolve()` before passing).
+- The DropdownMenu uses `tabindex="-1"` on the menu div to satisfy the `a11y_interactive_supports_focus` rule for elements with `role="menu"`.
+- The `SnapshotCreate` component accepts a `sceneId` prop for future use (e.g., custom snapshot API) but currently uses form actions, so an eslint-disable is applied.
+- The `formatDeadline` function compares dates by calendar day (stripping time) to avoid off-by-one errors from `Math.ceil` on fractional day differences.
+- Draft creation automatically duplicates all scenes from the source (active) draft, giving each draft independent content.
+- The partial unique index on `drafts(project_id) WHERE is_active = true` enforces at most one active draft per project at the database level.
