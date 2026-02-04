@@ -1,0 +1,16 @@
+# Package Managers
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# Output
+.svelte-kit
+build
+dist
+
+# Non-project files
+.claude
+docs
+*.md
+!README.md
+supabase

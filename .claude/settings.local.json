@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:svelte.dev)",
+      "WebFetch(domain:ai-sdk.dev)",
+      "WebFetch(domain:supabase.com)",
+      "WebFetch(domain:dev.to)",
+      "Bash(node --version:*)",
+      "Bash(npm:*)",
+      "Bash(npx sv create:*)",
+      "Bash(git init:*)",
+      "Bash(npx supabase:*)",
+      "Bash(npx prettier:*)",
+      "Bash(tree:*)",
+      "Bash(perl -i -pe:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
+    ]
+  }
+}
