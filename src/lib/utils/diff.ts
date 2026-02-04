@@ -22,3 +22,32 @@ export function computeDiff(oldHtml: string, newHtml: string): DiffSegment[] {
 		text
 	}));
 }
+
+export interface WordDelta {
+	added: number;
+	deleted: number;
+}
+
+function countWordsInText(text: string): number {
+	const trimmed = text.trim();
+	if (!trimmed) return 0;
+	return trimmed.split(/\s+/).length;
+}
+
+export function calculateWordDelta(oldHtml: string, newHtml: string): WordDelta {
+	const diffs = computeDiff(oldHtml, newHtml);
+
+	let added = 0;
+	let deleted = 0;
+
+	for (const segment of diffs) {
+		const wordCount = countWordsInText(segment.text);
+		if (segment.type === 'insert') {
+			added += wordCount;
+		} else if (segment.type === 'delete') {
+			deleted += wordCount;
+		}
+	}
+
+	return { added, deleted };
+}

@@ -6,6 +6,8 @@
 	import EditorToolbar from './EditorToolbar.svelte';
 	import WordCounter from './WordCounter.svelte';
 	import SceneStatusBadge from '$lib/components/ui/SceneStatusBadge.svelte';
+	import SessionTimer from './SessionTimer.svelte';
+	import * as sessionStore from '$lib/stores/sessionStore';
 
 	type Scene = Database['public']['Tables']['scenes']['Row'];
 
@@ -27,8 +29,38 @@
 	let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 	let saving = $state(false);
 	let status: SceneStatus = $state(scene.status);
+	let sessionStarted = $state(false);
+	let currentSession = $state(sessionStore.getSession());
 
 	const statuses: SceneStatus[] = ['brainstormed', 'rough', 'revised', 'polished', 'final'];
+
+	// Subscribe to session store changes
+	const unsubscribe = sessionStore.subscribe((session) => {
+		currentSession = session;
+	});
+
+	async function handleEditorUpdate(html: string) {
+		const wc = countWords(html);
+
+		// Start session on first keystroke
+		if (!sessionStarted && !currentSession) {
+			sessionStarted = true;
+			await sessionStore.startSession({
+				projectId,
+				sceneId: scene.id,
+				startingWordCount: scene.word_count,
+				initialContent: scene.content
+			});
+		}
+
+		// Record activity for session tracking
+		if (currentSession) {
+			sessionStore.recordActivity(html, wc);
+		}
+
+		wordCount = wc;
+		autoSave(html);
+	}
 
 	async function autoSave(html: string) {
 		if (saveTimeout) clearTimeout(saveTimeout);
@@ -64,17 +96,19 @@
 			editor = createEditor({
 				content: scene.content,
 				element: editorElement,
-				onUpdate: (html) => {
-					wordCount = countWords(html);
-					autoSave(html);
-				}
+				onUpdate: handleEditorUpdate
 			});
 		}
 	});
 
 	onDestroy(() => {
+		unsubscribe();
 		if (saveTimeout) clearTimeout(saveTimeout);
 		editor?.destroy();
+		// End session when leaving the editor
+		if (currentSession) {
+			sessionStore.endSession();
+		}
 	});
 </script>
 
@@ -88,6 +122,9 @@
 			{/if}
 		</div>
 		<div class="flex items-center gap-3">
+			{#if currentSession}
+				<SessionTimer />
+			{/if}
 			<select
 				value={status}
 				onchange={(e) => updateStatus(e.currentTarget.value as SceneStatus)}

@@ -1,5 +1,8 @@
 export type ProjectStatus = 'planning' | 'drafting' | 'revising' | 'complete' | 'on_hold';
 export type SceneStatus = 'brainstormed' | 'rough' | 'revised' | 'polished' | 'final';
+export type GoalType = 'word_count' | 'daily_words' | 'weekly_words' | 'daily_time' | 'weekly_time' | 'deadline';
+export type GoalScope = 'global' | 'project';
+export type GoalStatus = 'active' | 'completed' | 'failed' | 'paused';
 
 export interface Database {
 	public: {
@@ -214,12 +217,65 @@ export interface Database {
 					created_at?: string;
 				};
 			};
+			goals: {
+				Row: {
+					id: string;
+					user_id: string;
+					project_id: string | null;
+					title: string;
+					goal_type: GoalType;
+					goal_scope: GoalScope;
+					status: GoalStatus;
+					target_value: number;
+					target_date: string | null;
+					current_value: number;
+					started_at: string;
+					is_recurring: boolean;
+					created_at: string;
+					updated_at: string;
+				};
+				Insert: {
+					id?: string;
+					user_id: string;
+					project_id?: string | null;
+					title: string;
+					goal_type: GoalType;
+					goal_scope: GoalScope;
+					status?: GoalStatus;
+					target_value: number;
+					target_date?: string | null;
+					current_value?: number;
+					started_at?: string;
+					is_recurring?: boolean;
+					created_at?: string;
+					updated_at?: string;
+				};
+				Update: {
+					id?: string;
+					user_id?: string;
+					project_id?: string | null;
+					title?: string;
+					goal_type?: GoalType;
+					goal_scope?: GoalScope;
+					status?: GoalStatus;
+					target_value?: number;
+					target_date?: string | null;
+					current_value?: number;
+					started_at?: string;
+					is_recurring?: boolean;
+					created_at?: string;
+					updated_at?: string;
+				};
+			};
 		};
 		Views: Record<string, never>;
 		Functions: Record<string, never>;
 		Enums: {
 			project_status: ProjectStatus;
 			scene_status: SceneStatus;
+			goal_type: GoalType;
+			goal_scope: GoalScope;
+			goal_status: GoalStatus;
 		};
 	};
 }
