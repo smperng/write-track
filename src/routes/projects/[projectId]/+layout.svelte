@@ -39,6 +39,10 @@
 	function handleDelete(type: string, id: string) {
 		handleStructureAction('delete', { type, id });
 	}
+
+	function handleReorder(type: string, items: { id: string; sort_order: number }[]) {
+		handleStructureAction('reorder', { type, items });
+	}
 </script>
 
 <svelte:head>
@@ -71,6 +75,7 @@
 				oncreatescene={handleCreateScene}
 				onrename={handleRename}
 				ondelete={handleDelete}
+				onreorder={handleReorder}
 			/>
 		</div>
 	</div>

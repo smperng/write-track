@@ -14,6 +14,9 @@
 		oncancel?: () => void;
 	} = $props();
 
+	let error = $state('');
+	let submitting = $state(false);
+
 	const statuses: { value: ProjectStatus; label: string }[] = [
 		{ value: 'planning', label: 'Planning' },
 		{ value: 'drafting', label: 'Drafting' },
@@ -23,9 +26,30 @@
 	];
 </script>
 
-<form method="POST" action={action} use:enhance>
+<form
+	method="POST"
+	action={action}
+	use:enhance={() => {
+		error = '';
+		submitting = true;
+		return async ({ result, update }) => {
+			submitting = false;
+			if (result.type === 'failure') {
+				error = (result.data as { error?: string })?.error ?? 'Something went wrong';
+			} else {
+				await update();
+			}
+		};
+	}}
+>
 	{#if project}
 		<input type="hidden" name="id" value={project.id} />
+	{/if}
+
+	{#if error}
+		<div class="mb-4 rounded-md bg-red-50 p-3 text-sm text-red-700">
+			{error}
+		</div>
 	{/if}
 
 	<div class="space-y-4">
@@ -115,9 +139,10 @@
 		{/if}
 		<button
 			type="submit"
-			class="rounded-md bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700"
+			disabled={submitting}
+			class="rounded-md bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700 disabled:opacity-50"
 		>
-			{project ? 'Save Changes' : 'Create Project'}
+			{submitting ? 'Saving…' : project ? 'Save Changes' : 'Create Project'}
 		</button>
 	</div>
 </form>
